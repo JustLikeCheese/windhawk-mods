@@ -849,12 +849,19 @@ bool GetMasterVolumeLevelScalarCheese(float* level) {
 }
 
 float g_cheeseFixTarget;
+bool g_cheeseFixPending;
+int g_cheeseFixTicks;
+UINT_PTR g_cheeseFixTimer;
 
-void CALLBACK CheeseFixVolumeTimerProc(HWND, UINT, UINT_PTR id, DWORD) {
-    KillTimer(nullptr, id);
+void CALLBACK CheeseFixVolumeTimerProc(HWND, UINT, UINT_PTR, DWORD) {
     float current;
     if (GetMasterVolumeLevelScalarCheese(&current)) {
         AddMasterVolumeLevelScalar(g_cheeseFixTarget - current);
+    }
+    if (++g_cheeseFixTicks >= 3) {
+        KillTimer(nullptr, g_cheeseFixTimer);
+        g_cheeseFixTimer = 0;
+        g_cheeseFixPending = false;
     }
 }
 
@@ -879,32 +886,33 @@ bool Win11IndicatorAdjustVolumeLevelWithMouseWheel(short delta) {
         }
 
         // [Cheese fork] Any step size (including odd ones like 1%) with the
-        // Windows 11 indicator. The indicator can only be shown by posting a
-        // volume app command, which always moves the volume by 2%. So first
-        // pre-adjust the volume by (total - 2)%, then post the app command,
-        // ending at exactly current + total. Near 0%/100% the pre-adjustment
-        // would be clamped, so there the app command goes first and a short
-        // timer corrects the volume afterwards.
+        // Windows 11 indicator. The indicator only appears for a volume app
+        // command, and Windows applies that command asynchronously with its
+        // own 2% (snapping) step. So post the app command just to show the
+        // indicator, and then set the exact target level a bit later (twice,
+        // to also win against a late app command). Rapid scrolls accumulate
+        // on top of the pending target.
         int step = g_settings.volumeChangeStep ? g_settings.volumeChangeStep : 2;
-        int total = clicks * step;
         float sign = appCommand == APPCOMMAND_VOLUME_UP ? 1.0f : -1.0f;
-        float current;
-        bool haveCurrent = GetMasterVolumeLevelScalarCheese(&current);
-        float pre = haveCurrent ? current + sign * (float)(total - 2) * 0.01f : 0.5f;
-        if (pre > -0.001f && pre < 1.001f) {
-            if (total != 2) {
-                AddMasterVolumeLevelScalar(sign * (float)(total - 2) * 0.01f);
-            }
-            if (!PostAppCommand(appCommand, 1)) {
-                return false;
-            }
-        } else {
-            float target = current + sign * (float)total * 0.01f;
+        float base;
+        if (!g_cheeseFixPending && !GetMasterVolumeLevelScalarCheese(&base)) {
+            base = -1.0f;
+        } else if (g_cheeseFixPending) {
+            base = g_cheeseFixTarget;
+        }
+        if (!PostAppCommand(appCommand, 1)) {
+            return false;
+        }
+        if (base >= 0.0f) {
+            // Round to whole percents so repeated 1% steps don't drift.
+            float target = (float)(int)(base * 100.0f + sign * (float)(clicks * step) + 100.5f) / 100.0f - 1.0f;
             g_cheeseFixTarget = target < 0.0f ? 0.0f : (target > 1.0f ? 1.0f : target);
-            if (!PostAppCommand(appCommand, 1)) {
-                return false;
+            g_cheeseFixPending = true;
+            g_cheeseFixTicks = 0;
+            if (g_cheeseFixTimer) {
+                KillTimer(nullptr, g_cheeseFixTimer);
             }
-            SetTimer(nullptr, 0, 60, CheeseFixVolumeTimerProc);
+            g_cheeseFixTimer = SetTimer(nullptr, 0, 80, CheeseFixVolumeTimerProc);
         }
     }
 
