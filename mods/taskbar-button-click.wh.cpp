@@ -1,6 +1,6 @@
 // ==WindhawkMod==
-// @id              taskbar-button-click
-// @name            Middle click to close on the taskbar
+// @id              taskbar-button-click-ctrl
+// @name            Ctrl+middle click to close on the taskbar (fork)
 // @description     Close programs with a middle click on the taskbar instead of creating a new instance
 // @version         1.0.9
 // @author          m417z
@@ -54,7 +54,7 @@ or a similar tool), enable the relevant option in the mod's settings.
   - none: Do nothing
 - keysToEndTask:
   - Ctrl: true
-  - Alt: false
+  - Alt: true
   $name: Keys to end task
   $description: >-
     A combination of keys that can be pressed while middle clicking to
@@ -250,6 +250,12 @@ long WINAPI CTaskBand_Launch_Hook(LPVOID pThis,
     // down.
     if (g_CTaskListWndClickAction != 3 || GetKeyState(VK_SHIFT) < 0) {
         return original();
+    }
+
+    // [Cheese fork] Only Ctrl+middle click closes; a plain middle click does
+    // nothing (neither closes nor opens a new instance).
+    if (GetKeyState(VK_CONTROL) >= 0) {
+        return 0;
     }
 
     // Group types:
