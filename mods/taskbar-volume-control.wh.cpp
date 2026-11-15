@@ -1,6 +1,6 @@
 // ==WindhawkMod==
 // @id              taskbar-volume-control
-// @name            Taskbar Volume Control
+// @name            Taskbar Volume Control (1% step fork)
 // @description     Control the system volume by scrolling over the taskbar or anywhere with modifier keys
 // @version         1.3.1
 // @author          m417z
@@ -81,7 +81,7 @@ issue](https://tweaker.userecho.com/topics/826-scroll-on-trackpadtouchpad-doesnt
     A comma-separated list of additional regions along the taskbar where
     scrolling will control the system volume. Each region is a range like
     "100-200" (pixels) or "20%-50%" (percentage of taskbar length).
-- middleClickToMute: true
+- middleClickToMute: false
   $name: Middle click to mute
   $description: >-
     With this option enabled, middle clicking the volume tray icon will
@@ -119,11 +119,11 @@ issue](https://tweaker.userecho.com/topics/826-scroll-on-trackpadtouchpad-doesnt
     default, the output device is muted once the volume reaches zero, and is
     unmuted on any change to a non-zero volume. Enabling this option turns off
     this functionality, such that the device mute status is not changed.
-- volumeChangeStep: 2
+- volumeChangeStep: 1
   $name: Volume change step
   $description: >-
     Allows to configure the volume change that will occur with each notch of
-    mouse wheel movement. For the Windows 11 indicator, must be a multiple of
+    mouse wheel movement. (Cheese fork: any value works with the Windows 11 indicator.) Was: must be a multiple of
     2.
 - oldTaskbarOnWin11: false
   $name: Customize the old taskbar on Windows 11
@@ -829,6 +829,35 @@ bool PostAppCommand(SHORT appCommand, int count) {
     return true;
 }
 
+// [Cheese fork] Helpers for odd volume steps with the Windows 11 indicator.
+bool GetMasterVolumeLevelScalarCheese(float* level) {
+    bool ok = false;
+    IMMDevice* defaultDevice = NULL;
+    IAudioEndpointVolume* endpointVolume = NULL;
+    if (g_pDeviceEnumerator &&
+        SUCCEEDED(g_pDeviceEnumerator->GetDefaultAudioEndpoint(
+            eRender, eConsole, &defaultDevice))) {
+        if (SUCCEEDED(defaultDevice->Activate(XIID_IAudioEndpointVolume,
+                                              CLSCTX_INPROC_SERVER, NULL,
+                                              (LPVOID*)&endpointVolume))) {
+            ok = SUCCEEDED(endpointVolume->GetMasterVolumeLevelScalar(level));
+            endpointVolume->Release();
+        }
+        defaultDevice->Release();
+    }
+    return ok;
+}
+
+float g_cheeseFixTarget;
+
+void CALLBACK CheeseFixVolumeTimerProc(HWND, UINT, UINT_PTR id, DWORD) {
+    KillTimer(nullptr, id);
+    float current;
+    if (GetMasterVolumeLevelScalarCheese(&current)) {
+        AddMasterVolumeLevelScalar(g_cheeseFixTarget - current);
+    }
+}
+
 bool Win11IndicatorAdjustVolumeLevelWithMouseWheel(short delta) {
     BOOL muted;
     if (g_settings.noAutomaticMuteToggle && IsVolMuted(&muted) && muted) {
@@ -849,18 +878,33 @@ bool Win11IndicatorAdjustVolumeLevelWithMouseWheel(short delta) {
             appCommand = APPCOMMAND_VOLUME_DOWN;
         }
 
-        if (g_settings.volumeChangeStep) {
-            clicks *= g_settings.volumeChangeStep / 2;
-        }
-
-        if (clicks > 1) {
-            AddMasterVolumeLevelScalar(
-                (appCommand == APPCOMMAND_VOLUME_UP ? 0.02f : -0.02f) *
-                (float)(clicks - 1));
-        }
-
-        if (!PostAppCommand(appCommand, 1)) {
-            return false;
+        // [Cheese fork] Any step size (including odd ones like 1%) with the
+        // Windows 11 indicator. The indicator can only be shown by posting a
+        // volume app command, which always moves the volume by 2%. So first
+        // pre-adjust the volume by (total - 2)%, then post the app command,
+        // ending at exactly current + total. Near 0%/100% the pre-adjustment
+        // would be clamped, so there the app command goes first and a short
+        // timer corrects the volume afterwards.
+        int step = g_settings.volumeChangeStep ? g_settings.volumeChangeStep : 2;
+        int total = clicks * step;
+        float sign = appCommand == APPCOMMAND_VOLUME_UP ? 1.0f : -1.0f;
+        float current;
+        bool haveCurrent = GetMasterVolumeLevelScalarCheese(&current);
+        float pre = haveCurrent ? current + sign * (float)(total - 2) * 0.01f : 0.5f;
+        if (pre > -0.001f && pre < 1.001f) {
+            if (total != 2) {
+                AddMasterVolumeLevelScalar(sign * (float)(total - 2) * 0.01f);
+            }
+            if (!PostAppCommand(appCommand, 1)) {
+                return false;
+            }
+        } else {
+            float target = current + sign * (float)total * 0.01f;
+            g_cheeseFixTarget = target < 0.0f ? 0.0f : (target > 1.0f ? 1.0f : target);
+            if (!PostAppCommand(appCommand, 1)) {
+                return false;
+            }
+            SetTimer(nullptr, 0, 60, CheeseFixVolumeTimerProc);
         }
     }
 
